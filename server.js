@@ -161,7 +161,6 @@ app.post('/webhook', async (req, res) => {
 async function handleEvent(event) {
   console.log(`🔄 Event type: ${event.type}`);
   
-  // จัดการเฉพาะข้อความที่เป็นข้อความ
   if (event.type !== 'message' || event.message.type !== 'text') {
     console.log('⏭️ Skipping non-text message');
     return null;
@@ -174,25 +173,24 @@ async function handleEvent(event) {
   console.log(`👤 User ${userId}: "${userMessage}"`);
 
   try {
-    // 🎬 Show Real LINE Loading Animation
-    console.log('🎬 Starting real LINE loading animation...');
     const loadingSeconds = getLoadingDuration(userMessage);
-    await showRealLoadingAnimation(userId, loadingSeconds);
-    
-    // 🤖 Process message with Dialogflow (during loading animation)
-    console.log('🚀 Processing with Dialogflow...');
-    const botResponse = await processWithDialogflow(userMessage, userId);
-    
-    // ⏰ รอให้ครบเวลาที่กำหนด (ถ้าประมวลผลเสร็จเร็วกว่า loading duration)
-    await sleep(Math.max(0, loadingSeconds * 1000 - 1000)); // ลบ 1 วินาทีเพื่อให้ดูเป็นธรรมชาติ
-    
-    // 📤 Send final response (loading animation จะหายไปอัตโนมัติ)
-    console.log(`📤 Sending response: "${botResponse}"`);
+
+    // 🎬 เริ่ม loading animation และประมวลผล Dialogflow พร้อมกัน
+    const loadingPromise = showRealLoadingAnimation(userId, loadingSeconds);
+    const dialogflowPromise = processWithDialogflow(userMessage, userId);
+
+    // ⏳ รอให้ loading ครบระยะเวลา
+    await sleep(loadingSeconds * 1000);
+
+    // ✅ รอให้ Dialogflow เสร็จ (ถ้ายังไม่เสร็จ)
+    const botResponse = await dialogflowPromise;
+
+    // 📤 ส่งข้อความตอบกลับหลัง loading หาย
     await client.replyMessage(replyToken, {
       type: 'text',
       text: botResponse
     });
-    
+
     console.log('✅ Message handled with real loading animation');
     return { 
       status: 'success', 
@@ -202,11 +200,10 @@ async function handleEvent(event) {
       loadingSeconds: loadingSeconds,
       animationType: 'real-line-loading'
     };
-    
+
   } catch (error) {
     console.error('❌ Error handling message:', error);
     
-    // Error fallback
     try {
       await client.replyMessage(replyToken, {
         type: 'text',
