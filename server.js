@@ -179,10 +179,16 @@ async function handleEvent(event) {
     const loadingPromise = showRealLoadingAnimation(userId, loadingSeconds);
     const dialogflowPromise = processWithDialogflow(userMessage, userId);
 
-    // ⏳ รอให้ loading ครบระยะเวลา
-    await sleep(loadingSeconds * 1000);
+    // 🎬 รอ 200ms ก่อน เพื่อให้ animation แสดงตัวขึ้นมา
+    await sleep(200);
 
-    // ✅ รอให้ Dialogflow เสร็จ (ถ้ายังไม่เสร็จ)
+    // ✅ รอให้ loading และเวลารวมครบ
+    await Promise.all([
+      loadingPromise,
+      sleep((loadingSeconds * 1000) - 200)
+    ]);
+
+    // 💬 รับคำตอบจาก Dialogflow
     const botResponse = await dialogflowPromise;
 
     // 📤 ส่งข้อความตอบกลับหลัง loading หาย
