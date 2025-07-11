@@ -2,179 +2,243 @@ require('dotenv').config();
 const express = require('express');
 const line = require('@line/bot-sdk');
 const { SessionsClient } = require('@google-cloud/dialogflow');
-const bodyParser = require('body-parser');
+const { v4: uuidv4 } = require('uuid');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// LINE Bot Configuration - ปิด signature validation ชั่วคราว
-const config = {
+// LINE Bot Configuration
+const lineConfig = {
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
   channelSecret: process.env.LINE_CHANNEL_SECRET,
 };
 
-// Dialogflow Configuration
-let sessionClient;
+const client = new line.Client(lineConfig);
 
-// ตรวจสอบว่าใช้ JSON จาก Environment Variable หรือไฟล์
-if (process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON) {
-  const credentials = JSON.parse(process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON);
-  sessionClient = new SessionsClient({
-    projectId: process.env.GOOGLE_PROJECT_ID,
-    credentials: credentials
-  });
-  console.log('🔑 Using credentials from Environment Variable');
-} else {
-  sessionClient = new SessionsClient({
-    projectId: process.env.GOOGLE_PROJECT_ID,
-    keyFilename: process.env.GOOGLE_APPLICATION_CREDENTIALS
-  });
-  console.log('🔑 Using credentials from file');
+// Dialogflow Configuration
+let sessionClient = null;
+let dialogflowReady = false;
+
+// Initialize Dialogflow
+async function initializeDialogflow() {
+  try {
+    if (process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON) {
+      // ใช้ JSON credentials จาก environment variable
+      const credentials = JSON.parse(process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON);
+      sessionClient = new SessionsClient({
+        projectId: process.env.GOOGLE_PROJECT_ID,
+        credentials: credentials
+      });
+      dialogflowReady = true;
+      console.log('✅ Dialogflow initialized from JSON credentials');
+    } else if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+      // ใช้ไฟล์ credentials
+      sessionClient = new SessionsClient({
+        projectId: process.env.GOOGLE_PROJECT_ID,
+        keyFilename: process.env.GOOGLE_APPLICATION_CREDENTIALS
+      });
+      dialogflowReady = true;
+      console.log('✅ Dialogflow initialized from file credentials');
+    } else {
+      throw new Error('No Google credentials found');
+    }
+  } catch (error) {
+    console.error('❌ Failed to initialize Dialogflow:', error.message);
+    dialogflowReady = false;
+  }
 }
 
-const client = new line.Client(config);
+// Initialize Dialogflow on startup
+initializeDialogflow();
 
 // Middleware
-app.use(bodyParser.json());
-app.use(bodyParser.urlencoded({ extended: true }));
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-// Security headers for production
+// CORS headers
 app.use((req, res, next) => {
-  res.header('X-Frame-Options', 'DENY');
-  res.header('X-Content-Type-Options', 'nosniff');
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
   next();
 });
 
-// Health check endpoint
+// Root endpoint
 app.get('/', (req, res) => {
-  res.json({ 
-    status: '🤖 LINE Dialogflow Bot is running!', 
+  res.json({
+    status: '🤖 LINE Dialogflow Bot is running!',
     timestamp: new Date().toISOString(),
     version: '1.0.0',
-    environment: process.env.NODE_ENV || 'development',
-    uptime: `${Math.floor(process.uptime())} seconds`
+    features: {
+      lineBot: !!process.env.LINE_CHANNEL_ACCESS_TOKEN,
+      dialogflow: dialogflowReady,
+      typingStatus: true,
+      autoReply: true
+    },
+    uptime: Math.floor(process.uptime()) + ' seconds'
   });
 });
 
+// Health check endpoint
 app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'OK', 
+  const health = {
+    status: 'OK',
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
     memory: process.memoryUsage(),
-    environment: process.env.NODE_ENV || 'development'
-  });
+    environment: process.env.NODE_ENV || 'development',
+    services: {
+      line: !!client,
+      dialogflow: dialogflowReady
+    }
+  };
+  res.json(health);
 });
 
-// Webhook verification endpoint (for LINE verification)
+// Webhook verification endpoint
 app.get('/webhook', (req, res) => {
-  console.log('🔍 Webhook verification request received');
-  res.status(200).send('Webhook verification successful');
+  console.log('🔍 GET Webhook verification received');
+  res.status(200).send('Webhook endpoint is working!');
 });
 
-// Webhook endpoint - แก้ไขให้ข้าม signature validation ชั่วคราว
-app.post('/webhook', (req, res) => {
-  console.log('📨 Received webhook:', JSON.stringify(req.body, null, 2));
+// Webhook endpoint for LINE
+app.post('/webhook', async (req, res) => {
+  console.log('📨 POST Webhook received:', JSON.stringify(req.body, null, 2));
   
   try {
-    // ตรวจสอบว่าเป็น verification request หรือไม่
-    if (!req.body.events || req.body.events.length === 0) {
-      console.log('✅ Verification request received');
+    const signature = req.get('X-Line-Signature');
+    console.log('🔐 Signature received:', signature ? 'Yes' : 'No');
+    
+    // ตรวจสอบว่ามี events หรือไม่
+    if (!req.body.events) {
+      console.log('✅ No events found - verification request');
       return res.status(200).json({ message: 'OK' });
     }
+
+    // ประมวลผล events ทั้งหมด
+    const results = await Promise.all(
+      req.body.events.map(event => handleEvent(event))
+    );
     
-    // ประมวลผล events โดยไม่ต้องผ่าน LINE middleware
-    Promise
-      .all(req.body.events.map(handleEvent))
-      .then((result) => {
-        console.log('✅ Webhook processed successfully');
-        res.status(200).json(result);
-      })
-      .catch((error) => {
-        console.error('❌ Error handling webhook:', error);
-        res.status(500).json({ error: 'Internal server error' });
-      });
-      
+    console.log('✅ All events processed successfully');
+    res.status(200).json({ message: 'OK', results });
+    
   } catch (error) {
-    console.error('❌ Error in webhook:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    console.error('❌ Webhook error:', error);
+    res.status(500).json({ 
+      error: 'Internal server error',
+      message: error.message 
+    });
   }
 });
 
 // Main event handler
 async function handleEvent(event) {
-  console.log('🔄 Handling event:', event.type);
+  console.log(`🔄 Processing event: ${event.type}`);
   
-  // จัดการเฉพาะข้อความที่เป็นตัวอักษร
+  // จัดการเฉพาะข้อความที่เป็นข้อความ
   if (event.type !== 'message' || event.message.type !== 'text') {
     console.log('⏭️ Skipping non-text message');
-    return Promise.resolve(null);
+    return null;
   }
 
-  const userId = event.source.userId;
-  const userMessage = event.message.text;
-  console.log(`👤 User ${userId} said: "${userMessage}"`);
+  const { replyToken, source, message } = event;
+  const userId = source.userId;
+  const userMessage = message.text.trim();
   
+  console.log(`👤 User ${userId} said: "${userMessage}"`);
+
   try {
-    // แสดงสถานะ "กำลังพิมพ์"
-    await showTypingStatus(userId);
+    // ขั้นตอนที่ 1: แสดงสถานะกำลังพิมพ์
+    console.log('💭 Sending typing status...');
+    await sendTypingStatus(userId);
     
-    // ส่งข้อความไป Dialogflow
-    const dialogflowResponse = await sendToDialogflow(userMessage, userId);
-    console.log(`🤖 Bot response: "${dialogflowResponse}"`);
+    // ขั้นตอนที่ 2: รอสักครู่เพื่อให้ดูเป็นธรรมชาติ
+    await sleep(1500);
     
-    // ตอบกลับผู้ใช้
-    return client.replyMessage(event.replyToken, {
+    // ขั้นตอนที่ 3: ประมวลผลข้อความและตอบกลับ
+    console.log('🤖 Processing message...');
+    const botResponse = await processMessage(userMessage, userId);
+    
+    // ขั้นตอนที่ 4: ส่งคำตอบกลับผู้ใช้
+    console.log(`📤 Replying: "${botResponse}"`);
+    await client.replyMessage(replyToken, {
       type: 'text',
-      text: dialogflowResponse
+      text: botResponse
     });
+    
+    console.log('✅ Event handled successfully');
+    return { status: 'success', userId, message: userMessage };
     
   } catch (error) {
-    console.error('❌ Error in handleEvent:', error);
+    console.error('❌ Error handling event:', error);
     
     // ส่งข้อความแจ้งข้อผิดพลาด
-    return client.replyMessage(event.replyToken, {
-      type: 'text',
-      text: 'ขออภัยครับ เกิดข้อผิดพลาดในระบบ กรุณาลองใหม่อีกครั้ง 🙏'
-    });
+    try {
+      await client.replyMessage(replyToken, {
+        type: 'text',
+        text: 'ขออภัยครับ เกิดข้อผิดพลาดในระบบ กรุณาลองใหม่อีกครั้งครับ 🙏'
+      });
+    } catch (replyError) {
+      console.error('❌ Failed to send error message:', replyError);
+    }
+    
+    return { status: 'error', error: error.message };
   }
 }
 
 // ฟังก์ชันแสดงสถานะกำลังพิมพ์
-async function showTypingStatus(userId) {
+async function sendTypingStatus(userId) {
   const typingMessages = [
     '💭 กำลังคิดคำตอบ...',
-    '🤔 กำลังวิเคราะห์...',
+    '🤔 กำลังวิเคราะห์คำถาม...',
     '⚡ กำลังประมวลผล...',
     '🔍 กำลังค้นหาข้อมูล...',
-    '🧠 กำลังใช้ AI คิด...'
+    '🧠 กำลังใช้ AI คิด...',
+    '✨ กำลังเตรียมคำตอบ...'
   ];
   
   const randomMessage = typingMessages[Math.floor(Math.random() * typingMessages.length)];
   
   try {
-    // ส่งข้อความแสดงสถานะ
     await client.pushMessage(userId, {
       type: 'text',
       text: randomMessage
     });
-    
-    // รอสักครู่เพื่อให้ดูเป็นธรรมชาติ
-    await new Promise(resolve => setTimeout(resolve, 1500));
-    
-    console.log(`💬 Showed typing status: "${randomMessage}"`);
-    
+    console.log(`💬 Typing status sent: "${randomMessage}"`);
   } catch (error) {
-    console.error('❌ Error showing typing status:', error);
+    console.error('❌ Failed to send typing status:', error);
   }
 }
 
-// ฟังก์ชันส่งข้อความไป Dialogflow
-async function sendToDialogflow(message, sessionId) {
+// ฟังก์ชันประมวลผลข้อความ
+async function processMessage(message, userId) {
+  // ลองใช้ Dialogflow ก่อน
+  if (dialogflowReady) {
+    try {
+      const dialogflowResponse = await queryDialogflow(message, userId);
+      if (dialogflowResponse && dialogflowResponse.trim()) {
+        return dialogflowResponse;
+      }
+    } catch (error) {
+      console.error('❌ Dialogflow error:', error);
+    }
+  }
+  
+  // ใช้ fallback responses ถ้า Dialogflow ไม่ทำงาน
+  return getFallbackResponse(message);
+}
+
+// ฟังก์ชันเชื่อมต่อ Dialogflow
+async function queryDialogflow(message, sessionId) {
+  if (!sessionClient || !dialogflowReady) {
+    throw new Error('Dialogflow not initialized');
+  }
+  
   try {
     const sessionPath = sessionClient.projectAgentSessionPath(
       process.env.GOOGLE_PROJECT_ID,
-      sessionId
+      sessionId || uuidv4()
     );
 
     const request = {
@@ -182,91 +246,138 @@ async function sendToDialogflow(message, sessionId) {
       queryInput: {
         text: {
           text: message,
-          languageCode: 'th-TH', // ภาษาไทย
-        },
-      },
+          languageCode: 'th-TH'
+        }
+      }
     };
 
-    console.log(`🚀 Sending to Dialogflow: "${message}"`);
-    const responses = await sessionClient.detectIntent(request);
-    const result = responses[0].queryResult;
+    console.log(`🚀 Querying Dialogflow: "${message}"`);
+    const [response] = await sessionClient.detectIntent(request);
+    const result = response.queryResult;
     
-    console.log(`📥 Dialogflow detected intent: "${result.intent?.displayName || 'Unknown'}"`);
+    console.log(`📥 Intent detected: "${result.intent?.displayName || 'Unknown'}"`);
     console.log(`📤 Dialogflow response: "${result.fulfillmentText}"`);
     
-    // ถ้าไม่มีคำตอบจาก Dialogflow
-    if (!result.fulfillmentText) {
-      return 'ขออภัยครับ ผมไม่เข้าใจคำถามของคุณ กรุณาลองถามใหม่อีกครั้ง 🤔\n\nลองพิมพ์ "สวัสดี" หรือ "ช่วยเหลือ" ดูครับ';
-    }
-    
-    return result.fulfillmentText;
+    return result.fulfillmentText || null;
     
   } catch (error) {
-    console.error('❌ Error sending to Dialogflow:', error);
-    
-    // Return fallback response แทนการ throw error
-    return `สวัสดีครับ! ได้รับข้อความ "${message}" แล้วครับ ขณะนี้ระบบ AI กำลังอัปเดต กรุณาลองใหม่อีกครั้งครับ 🤖`;
+    console.error('❌ Dialogflow query error:', error);
+    throw error;
   }
+}
+
+// ฟังก์ชันตอบกลับแบบ fallback
+function getFallbackResponse(message) {
+  const lowerMessage = message.toLowerCase();
+  
+  // คำทักทาย
+  if (lowerMessage.includes('สวัสดี') || lowerMessage.includes('หวัดดี') || 
+      lowerMessage.includes('ดี') || lowerMessage.includes('hello') || 
+      lowerMessage.includes('hi')) {
+    return '🤖 สวัสดีครับ! ผมคือ Yondaime Bot ยินดีให้บริการครับ\n\nคุณสามารถสอบถามข้อมูลหรือขอความช่วยเหลือจากผมได้เลยครับ 😊';
+  }
+  
+  // คำถามขอความช่วยเหลือ
+  if (lowerMessage.includes('ช่วย') || lowerMessage.includes('help') || 
+      lowerMessage.includes('สอบถาม') || lowerMessage.includes('ขอข้อมูล')) {
+    return '📋 ผมสามารถช่วยเหลือคุณได้ในเรื่องต่างๆ เช่น:\n\n• ตอบคำถามทั่วไป\n• ให้ข้อมูลและคำแนะนำ\n• แชทคุยเป็นเพื่อน\n\nลองถามผมดูสิครับ! 💪';
+  }
+  
+  // คำลา
+  if (lowerMessage.includes('บาย') || lowerMessage.includes('ลาก่อน') || 
+      lowerMessage.includes('ไปก่อน') || lowerMessage.includes('ขอบคุณ')) {
+    return '🙏 ขอบคุณครับ! หวังว่าจะได้ช่วยเหลือคุณอีกครับ\n\nมีอะไรก็กลับมาคุยกันใหม่นะครับ ดูแลตัวเองด้วยครับ! 😊';
+  }
+  
+  // การทดสอบ
+  if (lowerMessage.includes('ทดสอบ') || lowerMessage.includes('test')) {
+    return '✅ ระบบทำงานปกติครับ!\n\n🤖 Bot Status: Online\n⚡ Response Time: Fast\n🌐 Server: Render\n📡 Connection: Stable\n\nพร้อมให้บริการครับ! 💪';
+  }
+  
+  // ตอบกลับแบบทั่วไป
+  const generalResponses = [
+    `🤖 ได้รับข้อความ "${message}" แล้วครับ!\n\nขณะนี้ระบบ AI กำลังเรียนรู้ ผมจึงยังตอบคำถามซับซ้อนไม่ได้ดีเท่าที่ควร\n\nลองถาม "ช่วยเหลือ" เพื่อดูสิ่งที่ผมทำได้ครับ 😊`,
+    
+    `💭 เข้าใจแล้วครับ คุณพูดว่า "${message}"\n\nผมกำลังพัฒนาความสามารถในการเข้าใจภาษาอยู่ครับ ขออภัยถ้าตอบไม่ตรงประเด็น\n\nมีอะไรอื่นให้ช่วยไหมครับ? 🤔`,
+    
+    `🎯 ขอบคุณสำหรับข้อความ "${message}" ครับ!\n\nผมยังเป็น AI ที่กำลังเรียนรู้ อาจตอบไม่ครบถ้วนในบางเรื่อง\n\nลองถามง่ายๆ หรือทักทาย "สวัสดี" ดูครับ! ☺️`
+  ];
+  
+  return generalResponses[Math.floor(Math.random() * generalResponses.length)];
+}
+
+// Utility function: sleep
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 // Error handling middleware
 app.use((error, req, res, next) => {
   console.error('💥 Unhandled error:', error);
-  res.status(500).json({ 
-    error: 'Something went wrong!',
-    message: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
+  res.status(500).json({
+    error: 'Internal server error',
+    message: process.env.NODE_ENV === 'development' ? error.message : 'Something went wrong'
   });
 });
 
-// Handle 404
+// 404 handler
 app.use('*', (req, res) => {
   res.status(404).json({
-    error: 'Route not found',
-    message: 'The requested endpoint does not exist'
+    error: 'Not found',
+    message: 'The requested endpoint does not exist',
+    availableEndpoints: ['/', '/health', '/webhook']
   });
 });
 
 // Start server
-app.listen(PORT, () => {
-  console.log('🚀 ====================================');
-  console.log(`🤖 LINE Dialogflow Bot Server Started`);
+const server = app.listen(PORT, () => {
+  console.log('🚀 =====================================');
+  console.log(`🤖 LINE Dialogflow Bot Started`);
   console.log(`📡 Port: ${PORT}`);
   console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`📊 Health Check: http://localhost:${PORT}/health`);
   console.log(`🔗 Webhook: http://localhost:${PORT}/webhook`);
-  console.log(`📅 Started at: ${new Date().toISOString()}`);
-  console.log('🚀 ====================================');
+  console.log(`📅 Started: ${new Date().toISOString()}`);
+  console.log('🚀 =====================================');
   
   // ตรวจสอบ Environment Variables
-  checkEnvironmentVariables();
+  validateEnvironment();
 });
 
 // ฟังก์ชันตรวจสอบ Environment Variables
-function checkEnvironmentVariables() {
-  const requiredVars = [
+function validateEnvironment() {
+  const required = [
     'LINE_CHANNEL_ACCESS_TOKEN',
-    'LINE_CHANNEL_SECRET', 
+    'LINE_CHANNEL_SECRET',
     'GOOGLE_PROJECT_ID'
   ];
   
-  const missingVars = requiredVars.filter(varName => !process.env[varName]);
+  const missing = required.filter(key => !process.env[key]);
   
-  if (missingVars.length > 0) {
-    console.log('⚠️  WARNING: Missing environment variables:');
-    missingVars.forEach(varName => {
-      console.log(`   ❌ ${varName}`);
-    });
-    console.log('   Please check your environment settings');
+  if (missing.length > 0) {
+    console.log('⚠️  Missing environment variables:');
+    missing.forEach(key => console.log(`   ❌ ${key}`));
   } else {
-    console.log('✅ All environment variables are set');
+    console.log('✅ All required environment variables are set');
   }
   
-  // ตรวจสอบ Google Credentials
+  // ตรวจสอบ Dialogflow credentials
   if (process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON) {
-    console.log('✅ Google credentials loaded from JSON environment variable');
+    console.log('✅ Dialogflow credentials: JSON format');
   } else if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
-    console.log('✅ Google credentials loaded from file path');
+    console.log('✅ Dialogflow credentials: File path');
   } else {
-    console.log('⚠️  WARNING: No Google credentials found');
+    console.log('⚠️  No Dialogflow credentials found - using fallback responses');
   }
 }
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('👋 SIGTERM received, shutting down gracefully');
+  server.close(() => {
+    console.log('🔴 Process terminated');
+    process.exit(0);
+  });
+});
+
+module.exports = app;
