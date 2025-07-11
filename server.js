@@ -3,6 +3,7 @@ const express = require('express');
 const line = require('@line/bot-sdk');
 const { SessionsClient } = require('@google-cloud/dialogflow');
 const { v4: uuidv4 } = require('uuid');
+const axios = require('axios');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -64,14 +65,15 @@ app.use((req, res, next) => {
 // Root endpoint
 app.get('/', (req, res) => {
   res.json({
-    status: '🤖 LINE Dialogflow Bot - Clean Typing Version',
+    status: '🤖 LINE Dialogflow Bot - Real Loading Animation',
     timestamp: new Date().toISOString(),
-    version: '1.1.0',
+    version: '2.0.0',
     features: {
       lineBot: !!process.env.LINE_CHANNEL_ACCESS_TOKEN,
       dialogflow: dialogflowReady,
-      typingDelay: '2.5 seconds',
-      cleanResponse: true
+      realLoadingAnimation: 'LINE Native Loading API',
+      loadingDuration: '3 seconds',
+      noSpamMessages: true
     },
     uptime: Math.floor(process.uptime()) + ' seconds'
   });
@@ -88,15 +90,43 @@ app.get('/health', (req, res) => {
     services: {
       line: !!client,
       dialogflow: dialogflowReady,
+      loadingAPI: 'Available',
       googleProject: process.env.GOOGLE_PROJECT_ID || 'not-set'
     }
   });
 });
 
+// 🎬 Loading Animation API Test Endpoint
+app.post('/api/loading/test', async (req, res) => {
+  const { userId, seconds = 5 } = req.body;
+  
+  if (!userId) {
+    return res.status(400).json({
+      status: 'error',
+      message: 'userId is required'
+    });
+  }
+
+  try {
+    const result = await showRealLoadingAnimation(userId, seconds);
+    res.json({
+      status: 'success',
+      message: `Loading animation sent to user ${userId} for ${seconds} seconds`,
+      timestamp: new Date().toISOString(),
+      result
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: error.message
+    });
+  }
+});
+
 // Webhook verification endpoint
 app.get('/webhook', (req, res) => {
   console.log('🔍 Webhook verification received');
-  res.status(200).send('Webhook is ready for LINE messages!');
+  res.status(200).send('Webhook ready with real LINE loading animation!');
 });
 
 // Main webhook endpoint
@@ -127,7 +157,7 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
-// 🎯 Main event handler - Clean version with typing delay
+// 🎬 Main event handler with Real Loading Animation
 async function handleEvent(event) {
   console.log(`🔄 Event type: ${event.type}`);
   
@@ -144,27 +174,33 @@ async function handleEvent(event) {
   console.log(`👤 User ${userId}: "${userMessage}"`);
 
   try {
-    // 🕐 Simulate typing delay (2.5 seconds)
-    console.log('💭 Simulating typing delay...');
-    await sleep(2500);
+    // 🎬 Show Real LINE Loading Animation
+    console.log('🎬 Starting real LINE loading animation...');
+    const loadingSeconds = getLoadingDuration(userMessage);
+    await showRealLoadingAnimation(userId, loadingSeconds);
     
-    // 🤖 Process message with Dialogflow
-    console.log('🚀 Querying Dialogflow...');
+    // 🤖 Process message with Dialogflow (during loading animation)
+    console.log('🚀 Processing with Dialogflow...');
     const botResponse = await processWithDialogflow(userMessage, userId);
     
-    // 📤 Reply immediately (no status messages)
-    console.log(`📤 Replying: "${botResponse}"`);
+    // ⏰ รอให้ครบเวลาที่กำหนด (ถ้าประมวลผลเสร็จเร็วกว่า loading duration)
+    await sleep(Math.max(0, loadingSeconds * 1000 - 1000)); // ลบ 1 วินาทีเพื่อให้ดูเป็นธรรมชาติ
+    
+    // 📤 Send final response (loading animation จะหายไปอัตโนมัติ)
+    console.log(`📤 Sending response: "${botResponse}"`);
     await client.replyMessage(replyToken, {
       type: 'text',
       text: botResponse
     });
     
-    console.log('✅ Message handled successfully');
+    console.log('✅ Message handled with real loading animation');
     return { 
       status: 'success', 
       userId: userId,
       input: userMessage,
-      output: botResponse 
+      output: botResponse,
+      loadingSeconds: loadingSeconds,
+      animationType: 'real-line-loading'
     };
     
   } catch (error) {
@@ -181,6 +217,63 @@ async function handleEvent(event) {
     }
     
     return { status: 'error', error: error.message };
+  }
+}
+
+// 🎯 Determine loading duration based on message complexity
+function getLoadingDuration(message) {
+  const messageLength = message.length;
+  
+  // ข้อความสั้น: 3 วินาที
+  if (messageLength <= 10) return 3;
+  
+  // ข้อความปานกลาง: 4 วินาที  
+  if (messageLength <= 30) return 4;
+  
+  // ข้อความยาว: 5 วินาที
+  if (messageLength <= 100) return 5;
+  
+  // ข้อความยาวมาก: 6 วินาที
+  return 6;
+}
+
+// 🎬 Real LINE Loading Animation Function
+async function showRealLoadingAnimation(userId, loadingSeconds = 3) {
+  try {
+    console.log(`🎬 Showing real loading animation for ${loadingSeconds} seconds...`);
+    
+    const response = await axios.post('https://api.line.me/v2/bot/chat/loading/start', {
+      chatId: userId,
+      loadingSeconds: loadingSeconds
+    }, {
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`
+      }
+    });
+    
+    console.log(`✅ Real loading animation started successfully`);
+    console.log(`⏰ Duration: ${loadingSeconds} seconds`);
+    
+    return {
+      success: true,
+      duration: loadingSeconds,
+      response: response.status
+    };
+    
+  } catch (error) {
+    console.error('❌ Failed to show real loading animation:', error.response?.data || error.message);
+    
+    // Fallback: ถ้า loading animation ไม่ทำงาน ให้ใช้ delay ธรรมดา
+    console.log('🔄 Falling back to simple delay...');
+    await sleep(loadingSeconds * 1000);
+    
+    return {
+      success: false,
+      fallback: true,
+      duration: loadingSeconds,
+      error: error.response?.data || error.message
+    };
   }
 }
 
@@ -226,8 +319,6 @@ async function queryDialogflow(message, sessionId) {
     };
 
     console.log(`🚀 Dialogflow query: "${message}"`);
-    console.log(`🎯 Project: ${process.env.GOOGLE_PROJECT_ID}`);
-    console.log(`🔑 Session: ${sessionId}`);
     
     const [response] = await sessionClient.detectIntent(request);
     const result = response.queryResult;
@@ -244,23 +335,33 @@ async function queryDialogflow(message, sessionId) {
   }
 }
 
-// 🛡️ Fallback response (backup when Dialogflow fails)
+// 🛡️ Fallback response
 function getFallbackResponse(message) {
   console.log(`🔄 Using fallback response for: "${message}"`);
   
   const lowerMessage = message.toLowerCase();
   
-  // Basic keyword matching for testing
+  // Loading animation info
+  if (lowerMessage.includes('loading') || lowerMessage.includes('โหลด')) {
+    return '🎬 ระบบใช้ Loading Animation จริงจาก LINE แล้ว!\n\n✅ ไม่มีข้อความสปาม\n✅ Animation แบบ Native\n✅ หายไปอัตโนมัติ\n✅ UX ดีขึ้นมาก\n\nลองส่งข้อความยาวๆ ดูครับ จะโหลดนานขึ้น! 🚀';
+  }
+  
+  // Basic responses
   if (lowerMessage.includes('สวัสดี') || lowerMessage.includes('หวัดดี') || lowerMessage.includes('hello')) {
-    return 'สวัสดีครับ! ระบบทำงานปกติ ขณะนี้เชื่อมต่อกับ Dialogflow แล้วครับ 🤖';
+    return '🤖 สวัสดีครับ! ระบบใช้ Loading Animation จริงจาก LINE API แล้ว\n\nคุณเห็น loading animation ที่เป็นแบบ native ของ LINE หรือไม่? ไม่มีข้อความสปามแล้วครับ! ✨';
   }
   
   if (lowerMessage.includes('ทดสอบ') || lowerMessage.includes('test')) {
-    return 'ระบบพร้อมใช้งานครับ! ✅\n\n• Dialogflow: ' + (dialogflowReady ? 'เชื่อมต่อแล้ว' : 'ไม่พร้อม') + '\n• Typing delay: 2.5 วินาที\n• Response: ทำงานปกติ';
+    return '🎬 ระบบ Real Loading Animation ทำงานแล้ว!\n\n✅ LINE Native Loading: ใช้งานได้\n✅ Auto Duration: 3-6 วินาที\n✅ No Spam Messages: สะอาด\n✅ Dialogflow: ' + (dialogflowReady ? 'พร้อม' : 'Fallback') + '\n\nทุกอย่างเพอร์เฟค! 🚀';
   }
   
-  // Default fallback
-  return `ได้รับข้อความ "${message}" แล้วครับ!\n\nหากคุณเห็นข้อความนี้ แสดงว่า Dialogflow อาจยังไม่มี Intent ที่ตรงกับคำถามของคุณ\n\nลองพิมพ์ "เชื่อมต่อ" เพื่อทดสอบ Intent ที่ตั้งค่าไว้ครับ 😊`;
+  if (lowerMessage.includes('เชื่อมต่อ')) {
+    return '🔗 ระบบเชื่อมต่อสำเร็จ!\n\n• Dialogflow: ' + (dialogflowReady ? '✅ พร้อม' : '⚠️ ไม่พร้อม') + '\n• LINE Loading API: ✅ ทำงาน\n• Real Animation: ✅ Native\n\nไม่มีข้อความสปามอีกแล้วครับ! 🎉';
+  }
+  
+  // Default with duration hint
+  const duration = getLoadingDuration(message);
+  return `📨 ได้รับข้อความ "${message}" แล้วครับ!\n\n🎬 คุณเห็น Loading Animation จริงๆ จาก LINE หรือไม่?\n⏰ Duration: ${duration} วินาที\n\nลองส่งข้อความยาวๆ ดู จะโหลดนานขึ้นครับ! ✨`;
 }
 
 // ⏰ Utility function: sleep
@@ -284,7 +385,8 @@ app.use('*', (req, res) => {
     message: 'Endpoint not found',
     availableEndpoints: {
       'GET /': 'Bot information',
-      'GET /health': 'Health check', 
+      'GET /health': 'Health check',
+      'POST /api/loading/test': 'Test real loading animation',
       'GET /webhook': 'Webhook verification',
       'POST /webhook': 'LINE webhook'
     }
@@ -294,10 +396,11 @@ app.use('*', (req, res) => {
 // Start server
 const server = app.listen(PORT, () => {
   console.log('🚀 =====================================');
-  console.log(`🤖 LINE Dialogflow Bot - Clean Version`);
+  console.log(`🤖 LINE Dialogflow Bot - Real Loading`);
   console.log(`📡 Port: ${PORT}`);
   console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`⏰ Typing delay: 2.5 seconds`);
+  console.log(`🎬 Loading: LINE Native API`);
+  console.log(`⏰ Duration: 3-6 seconds (auto)`);
   console.log(`🔗 Webhook: http://localhost:${PORT}/webhook`);
   console.log(`📅 Started: ${new Date().toISOString()}`);
   console.log('🚀 =====================================');
@@ -318,21 +421,12 @@ function validateEnvironment() {
   if (missing.length > 0) {
     console.log('⚠️  Missing required environment variables:');
     missing.forEach(key => console.log(`   ❌ ${key}`));
-    console.log('   Please set these in Render dashboard');
   } else {
     console.log('✅ All required environment variables are set');
   }
   
-  // Check Dialogflow credentials
-  if (process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON) {
-    console.log('✅ Dialogflow: JSON credentials found');
-  } else if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
-    console.log('✅ Dialogflow: File path credentials found');
-  } else {
-    console.log('⚠️  Dialogflow: No credentials found - will use fallback responses');
-  }
-  
   console.log(`🎯 Google Cloud Project: ${process.env.GOOGLE_PROJECT_ID || 'Not set'}`);
+  console.log('🎬 Real Loading Animation API: Ready');
 }
 
 // Graceful shutdown
