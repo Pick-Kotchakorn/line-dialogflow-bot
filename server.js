@@ -14,10 +14,25 @@ const config = {
 };
 
 // Dialogflow Configuration
-const sessionClient = new SessionsClient({
-  projectId: process.env.GOOGLE_PROJECT_ID,
-  keyFilename: process.env.GOOGLE_APPLICATION_CREDENTIALS
-});
+let sessionClient;
+
+// ตรวจสอบว่าใช้ JSON จาก Environment Variable หรือไฟล์
+if (process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON) {
+  // วิธีที่ 1: ใช้ JSON จาก Environment Variable
+  const credentials = JSON.parse(process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON);
+  sessionClient = new SessionsClient({
+    projectId: process.env.GOOGLE_PROJECT_ID,
+    credentials: credentials
+  });
+  console.log('🔑 Using credentials from Environment Variable');
+} else {
+  // วิธีที่ 2: ใช้ไฟล์ (fallback)
+  sessionClient = new SessionsClient({
+    projectId: process.env.GOOGLE_PROJECT_ID,
+    keyFilename: process.env.GOOGLE_APPLICATION_CREDENTIALS
+  });
+  console.log('🔑 Using credentials from file');
+}
 
 const client = new line.Client(config);
 
@@ -25,12 +40,21 @@ const client = new line.Client(config);
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
+// Security headers for production
+app.use((req, res, next) => {
+  res.header('X-Frame-Options', 'DENY');
+  res.header('X-Content-Type-Options', 'nosniff');
+  next();
+});
+
 // Health check endpoint
 app.get('/', (req, res) => {
   res.json({ 
-    status: 'LINE Dialogflow Bot is running!', 
+    status: '🤖 LINE Dialogflow Bot is running!', 
     timestamp: new Date().toISOString(),
-    version: '1.0.0'
+    version: '1.0.0',
+    environment: process.env.NODE_ENV || 'development',
+    uptime: `${Math.floor(process.uptime())} seconds`
   });
 });
 
@@ -38,19 +62,33 @@ app.get('/health', (req, res) => {
   res.json({ 
     status: 'OK', 
     timestamp: new Date().toISOString(),
-    uptime: process.uptime()
+    uptime: process.uptime(),
+    memory: process.memoryUsage(),
+    environment: process.env.NODE_ENV || 'development'
   });
+});
+
+// Webhook verification endpoint (for LINE verification)
+app.get('/webhook', (req, res) => {
+  console.log('🔍 Webhook verification request received');
+  res.status(200).send('Webhook verification successful');
 });
 
 // Webhook endpoint
 app.post('/webhook', line.middleware(config), (req, res) => {
   console.log('📨 Received webhook:', JSON.stringify(req.body, null, 2));
   
+  // ตรวจสอบว่าเป็น verification request หรือไม่
+  if (!req.body.events || req.body.events.length === 0) {
+    console.log('✅ Verification request received');
+    return res.status(200).json({ message: 'OK' });
+  }
+  
   Promise
     .all(req.body.events.map(handleEvent))
     .then((result) => {
       console.log('✅ Webhook processed successfully');
-      res.json(result);
+      res.status(200).json(result);
     })
     .catch((error) => {
       console.error('❌ Error handling webhook:', error);
@@ -103,7 +141,8 @@ async function showTypingStatus(userId) {
     '💭 กำลังคิดคำตอบ...',
     '🤔 กำลังวิเคราะห์...',
     '⚡ กำลังประมวลผล...',
-    '🔍 กำลังค้นหาข้อมูล...'
+    '🔍 กำลังค้นหาข้อมูล...',
+    '🧠 กำลังใช้ AI คิด...'
   ];
   
   const randomMessage = typingMessages[Math.floor(Math.random() * typingMessages.length)];
@@ -147,12 +186,12 @@ async function sendToDialogflow(message, sessionId) {
     const responses = await sessionClient.detectIntent(request);
     const result = responses[0].queryResult;
     
-    console.log(`📥 Dialogflow detected intent: "${result.intent.displayName}"`);
+    console.log(`📥 Dialogflow detected intent: "${result.intent?.displayName || 'Unknown'}"`);
     console.log(`📤 Dialogflow response: "${result.fulfillmentText}"`);
     
     // ถ้าไม่มีคำตอบจาก Dialogflow
     if (!result.fulfillmentText) {
-      return 'ขออภัยครับ ผมไม่เข้าใจคำถามของคุณ กรุณาลองถามใหม่อีกครั้ง 🤔';
+      return 'ขออภัยครับ ผมไม่เข้าใจคำถามของคุณ กรุณาลองถามใหม่อีกครั้ง 🤔\n\nลองพิมพ์ "สวัสดี" หรือ "ช่วยเหลือ" ดูครับ';
     }
     
     return result.fulfillmentText;
@@ -162,67 +201,17 @@ async function sendToDialogflow(message, sessionId) {
     
     // ตรวจสอบประเภทของ error
     if (error.code === 'ENOENT') {
-      throw new Error('Service Account Key file not found. Please check GOOGLE_APPLICATION_CREDENTIALS path.');
+      console.error('Service Account Key file not found');
+      return 'ขออภัยครับ เกิดปัญหาเกี่ยวกับการตั้งค่าระบบ (Service Account Key not found)';
     } else if (error.code === 3) {
-      throw new Error('Invalid Google Cloud Project ID or Dialogflow not enabled.');
+      console.error('Invalid Google Cloud Project ID or Dialogflow not enabled');
+      return 'ขออภัยครับ เกิดปัญหาเกี่ยวกับการเชื่อมต่อ Dialogflow';
     } else if (error.code === 7) {
-      throw new Error('Permission denied. Please check Service Account permissions.');
+      console.error('Permission denied. Check Service Account permissions');
+      return 'ขออภัยครับ เกิดปัญหาเกี่ยวกับสิทธิ์การเข้าถึง';
     }
     
-    throw error;
-  }
-}
-
-// ฟังก์ชันส่ง Rich Message (เสริม)
-async function sendRichMessage(userId, type = 'menu') {
-  const richMessages = {
-    menu: {
-      type: 'template',
-      altText: 'เมนูหลัก',
-      template: {
-        type: 'buttons',
-        text: 'เลือกหัวข้อที่ต้องการสอบถาม',
-        actions: [
-          {
-            type: 'message',
-            label: '📋 ข้อมูลทั่วไป',
-            text: 'ข้อมูลทั่วไป'
-          },
-          {
-            type: 'message',
-            label: '📞 ติดต่อเจ้าหน้าที่',
-            text: 'ติดต่อเจ้าหน้าที่'
-          },
-          {
-            type: 'message',
-            label: '❓ คำถามที่พบบ่อย',
-            text: 'คำถามที่พบบ่อย'
-          }
-        ]
-      }
-    },
-    greeting: {
-      type: 'template',
-      altText: 'สวัสดีครับ!',
-      template: {
-        type: 'buttons',
-        text: 'สวัสดีครับ! ยินดีให้บริการ',
-        actions: [
-          {
-            type: 'message',
-            label: '🚀 เริ่มต้นใช้งาน',
-            text: 'เริ่มต้นใช้งาน'
-          }
-        ]
-      }
-    }
-  };
-  
-  try {
-    await client.pushMessage(userId, richMessages[type]);
-    console.log(`📋 Sent rich message: ${type}`);
-  } catch (error) {
-    console.error('❌ Error sending rich message:', error);
+    return 'ขออภัยครับ เกิดข้อผิดพลาดในระบบ กรุณาลองใหม่อีกครั้ง 🙏';
   }
 }
 
@@ -231,7 +220,15 @@ app.use((error, req, res, next) => {
   console.error('💥 Unhandled error:', error);
   res.status(500).json({ 
     error: 'Something went wrong!',
-    message: error.message 
+    message: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
+  });
+});
+
+// Handle 404
+app.use('*', (req, res) => {
+  res.status(404).json({
+    error: 'Route not found',
+    message: 'The requested endpoint does not exist'
   });
 });
 
@@ -240,8 +237,9 @@ app.listen(PORT, () => {
   console.log('🚀 ====================================');
   console.log(`🤖 LINE Dialogflow Bot Server Started`);
   console.log(`📡 Port: ${PORT}`);
-  console.log(`🌐 Webhook URL: http://localhost:${PORT}/webhook`);
+  console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`📊 Health Check: http://localhost:${PORT}/health`);
+  console.log(`🔗 Webhook: http://localhost:${PORT}/webhook`);
   console.log(`📅 Started at: ${new Date().toISOString()}`);
   console.log('🚀 ====================================');
   
@@ -254,8 +252,7 @@ function checkEnvironmentVariables() {
   const requiredVars = [
     'LINE_CHANNEL_ACCESS_TOKEN',
     'LINE_CHANNEL_SECRET', 
-    'GOOGLE_PROJECT_ID',
-    'GOOGLE_APPLICATION_CREDENTIALS'
+    'GOOGLE_PROJECT_ID'
   ];
   
   const missingVars = requiredVars.filter(varName => !process.env[varName]);
@@ -265,8 +262,17 @@ function checkEnvironmentVariables() {
     missingVars.forEach(varName => {
       console.log(`   ❌ ${varName}`);
     });
-    console.log('   Please check your .env file');
+    console.log('   Please check your environment settings');
   } else {
     console.log('✅ All environment variables are set');
+  }
+  
+  // ตรวจสอบ Google Credentials
+  if (process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON) {
+    console.log('✅ Google credentials loaded from JSON environment variable');
+  } else if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+    console.log('✅ Google credentials loaded from file path');
+  } else {
+    console.log('⚠️  WARNING: No Google credentials found');
   }
 }
